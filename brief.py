@@ -12,19 +12,50 @@ JST = timezone(timedelta(hours=9))
 MARKETS = (
     ("Emas (futures GC=F, acuan XAUUSD)", "GC=F"),
     ("Nasdaq-100 (futures NQ=F)", "NQ=F"),
+    ("DXY", "DX-Y.NYB"),
+    ("EUR/USD", "EURUSD=X"),
+    ("USD/JPY", "JPY=X"),
 )
 
 def quote(label, symbol):
     try:
         bars = yf.Ticker(symbol).history(period="5d", interval="60m", timeout=10)
         closes = bars["Close"].dropna()
+        now = datetime.now(JST)
+        closes = closes[closes.index <= now - timedelta(hours=1)]
         latest = closes.iloc[-1]
         stamp = closes.index[-1].astimezone(JST)
         earlier = closes[closes.index <= closes.index[-1] - timedelta(hours=12)]
-        change = f" | {latest / earlier.iloc[-1] - 1:+.2%} vs bar sebelumnya (≥12 jam)" if len(earlier) else ""
-        return f"• {label}: {latest:,.2f}{change} | bar {stamp:%d/%m %H:%M} JST"
+        delta = latest / earlier.iloc[-1] - 1 if len(earlier) else None
+        fresh = now - stamp <= timedelta(hours=3)
+        aligned = len(earlier) and closes.index[-1] - earlier.index[-1] <= timedelta(hours=13)
+        change = f" | {delta:+.2%} (~12j)" if aligned else ""
+        status = "" if fresh else " · data lama"
+        return f"• {label}: {latest:,.2f}{change} | {stamp:%d/%m %H:%M}{status}", delta if fresh and aligned else None
     except Exception:
-        return f"• {label}: data tidak tersedia."
+        return f"• {label}: data tidak tersedia.", None
+
+def market_view(changes):
+    gold, nasdaq, dollar, eur, yen = changes
+    if gold is None or dollar is None:
+        view = "WAIT · Data emas/DXY kurang segar atau tidak lengkap."
+    elif gold > 0.001 and dollar < -0.001:
+        view = "LONG watch · Emas naik, DXY turun. Di XAUUSD spot, tunggu H1 close di atas swing high, lalu M15 retest bertahan."
+    elif gold < -0.001 and dollar > 0.001:
+        view = "SHORT watch · Emas turun, DXY naik. Di XAUUSD spot, tunggu H1 close di bawah swing low, lalu M15 retest tertolak."
+    else:
+        view = "WAIT · Arah emas dan DXY belum memberi konfirmasi searah untuk setup."
+    if nasdaq is not None and abs(nasdaq) >= 0.001:
+        view += " Nasdaq futures " + ("menguat." if nasdaq > 0 else "melemah.")
+    if eur is not None and yen is not None and abs(eur) >= 0.001 and abs(yen) >= 0.001:
+        if eur > 0 and yen < 0:
+            view += " EUR/USD dan USD/JPY sama-sama mengarah ke USD lemah."
+        elif eur < 0 and yen > 0:
+            view += " EUR/USD dan USD/JPY sama-sama mengarah ke USD kuat."
+        else:
+            view += " Konfirmasi USD dari dua pair bercampur."
+    return view
+
 
 def headlines(now):
     query = urlencode({"q": "global economy Fed OR inflation OR oil when:1d",
@@ -75,9 +106,11 @@ def main():
     parser.add_argument("--send", action="store_true")
     args = parser.parse_args()
     now = datetime.now(JST)
+    quotes, changes = zip(*(quote(*market) for market in MARKETS))
     lines = [f"**TIC JAPAN | Market Brief · {now:%d/%m/%Y %H:%M} JST**",
-             "**Pasar · Yahoo Finance**", *(quote(*market) for market in MARKETS),
-             "Harga mengikuti bar terakhir yang tersedia dan dapat tertunda saat pasar tutup.",
+             "**Pasar · bar H1 terakhir, JST · Yahoo Finance**", *quotes,
+             "**XAUUSD · Skenario bersyarat**", market_view(changes),
+             "Batalkan jika retest gagal. Pakai level spot broker. Cek agenda makro dan target minimal 2R sebelum entry.",
              "**Ekonomi global · headline 12 jam terakhir**"]
     for line in headlines(now):
         if len("\n".join([*lines, line]).encode("utf-16-le")) // 2 <= 2000:
